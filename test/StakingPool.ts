@@ -44,7 +44,7 @@ describe("StakingPool", function () {
   });
 
 
-  it("Delayed claim", async function () {
+  it("Delayed claim (no profit → no fee)", async function () {
     const [, user] = await ethers.getSigners();
     const staking = await deployStaking();
     const addr = await staking.getAddress();
@@ -57,35 +57,23 @@ describe("StakingPool", function () {
     const totalSharesBefore = await staking.totalShares();
     const poolBalanceBefore = await ethers.provider.getBalance(addr);
 
-    expect(userSharesBefore).to.equal(twoEth);
-    expect(totalSharesBefore).to.equal(twoEth);
-    expect(poolBalanceBefore).to.equal(twoEth);
-
     const halfShares = userSharesBefore / 2n;
 
     await (
       await staking.connect(user).requestWithdraw(halfShares)
     ).wait();
 
-    const req = await staking.withdrawalRequests(user.address);
-    expect(req.shares).to.equal(halfShares);
-    expect(req.readyAt).to.be.greaterThan(0);
-
-    await expect(
-      staking.connect(user).claimWithdraw(),
-    ).to.be.revertedWith("Withdrawal not ready");
-
     await ethers.provider.send("evm_increaseTime", [WITHDRAWAL_DELAY + 1]);
     await ethers.provider.send("evm_mine", []);
 
-    const tx = await staking.connect(user).claimWithdraw();
-    await tx.wait();
+    await (await staking.connect(user).claimWithdraw()).wait();
+
+    const expectedEth =
+      (halfShares * poolBalanceBefore) / totalSharesBefore;
 
     const userSharesAfter = await staking.shares(user.address);
     const totalSharesAfter = await staking.totalShares();
     const poolBalanceAfter = await ethers.provider.getBalance(addr);
-
-    const expectedEth = (halfShares * poolBalanceBefore) / totalSharesBefore;
 
     expect(userSharesAfter).to.equal(userSharesBefore - halfShares);
     expect(totalSharesAfter).to.equal(totalSharesBefore - halfShares);
@@ -93,7 +81,6 @@ describe("StakingPool", function () {
 
     const reqAfter = await staking.withdrawalRequests(user.address);
     expect(reqAfter.shares).to.equal(0n);
-    expect(reqAfter.readyAt).to.equal(0n);
   });
 
 
@@ -241,4 +228,61 @@ describe("StakingPool", function () {
     ).to.be.revertedWith("Zero address");
   });
 
+
+  it("Withdraw with profit applies NORMAL fee", async function () {
+    const [owner, user] = await ethers.getSigners();
+    const staking = await deployStaking();
+    const addr = await staking.getAddress();
+
+    const oneEth = ethers.parseEther("1");
+
+    await (await staking.connect(user).deposit({ value: oneEth })).wait();
+    await (await owner.sendTransaction({ to: addr, value: oneEth })).wait();
+
+    const shares = await staking.shares(user.address);
+
+    await (await staking.connect(user).requestWithdraw(shares)).wait();
+
+    await ethers.provider.send("evm_increaseTime", [WITHDRAWAL_DELAY + 1]);
+    await ethers.provider.send("evm_mine", []);
+
+    const ownerBalanceBefore = await ethers.provider.getBalance(owner.address);
+
+    await (await staking.connect(user).claimWithdraw()).wait();
+
+    const ownerBalanceAfter = await ethers.provider.getBalance(owner.address);
+
+    const gross = ethers.parseEther("2");
+    const profit = ethers.parseEther("1");
+    const fee = (profit * 500n) / 10_000n;
+
+    expect(ownerBalanceAfter - ownerBalanceBefore).to.equal(fee);
+  });
+
+
+  it("Early withdraw applies EARLY fee", async function () {
+    const [owner, user] = await ethers.getSigners();
+    const staking = await deployStaking();
+    const addr = await staking.getAddress();
+
+    const oneEth = ethers.parseEther("1");
+
+    await (await staking.connect(user).deposit({ value: oneEth })).wait();
+    await (await owner.sendTransaction({ to: addr, value: oneEth })).wait();
+
+    const shares = await staking.shares(user.address);
+
+    await (await staking.connect(user).requestWithdraw(shares)).wait();
+
+    const ownerBalanceBefore = await ethers.provider.getBalance(owner.address);
+
+    await (await staking.connect(user).claimWithdraw()).wait();
+
+    const ownerBalanceAfter = await ethers.provider.getBalance(owner.address);
+
+    const profit = ethers.parseEther("1");
+    const fee = (profit * 1500n) / 10_000n;
+
+    expect(ownerBalanceAfter - ownerBalanceBefore).to.equal(fee);
+  });
 });

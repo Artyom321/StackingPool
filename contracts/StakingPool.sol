@@ -4,6 +4,9 @@ pragma solidity ^0.8.28;
 contract StakingPool {
     address public owner;
     uint256 public totalShares;
+    uint256 public constant NORMAL_FEE_BPS = 500;
+    uint256 public constant EARLY_FEE_BPS  = 1500;
+    mapping(address => uint256) public deposited;
     mapping(address => uint256) public shares;
 
     uint256 public withdrawalDelay;
@@ -34,6 +37,7 @@ contract StakingPool {
     event Withdrawn(address indexed user, uint256 amount, uint256 sharesBurned);
     event RewardsAdded(address indexed from, uint256 amount);
     event OwnerChanged(address indexed oldOwner, address indexed newOwner);
+    event FeeTaken(address indexed user, uint256 profit, uint256 fee);
 
     constructor(uint256 _withdrawalDelay) {
         owner = msg.sender;
@@ -67,6 +71,7 @@ contract StakingPool {
 
         shares[msg.sender] += sharesToMint;
         totalShares += sharesToMint;
+        deposited[msg.sender] += msg.value;
 
         emit Deposited(msg.sender, msg.value, sharesToMint);
     }
@@ -90,25 +95,40 @@ contract StakingPool {
     function claimWithdraw() external nonReentrant {
         WithdrawalRequest memory req = withdrawalRequests[msg.sender];
         require(req.shares > 0, "No pending withdrawal");
-        require(block.timestamp >= req.readyAt, "Withdrawal not ready");
 
         uint256 poolBalance = address(this).balance;
-        require(poolBalance > 0, "Empty pool");
-        require(totalShares > 0, "No shares");
-
-        uint256 ethAmount = (req.shares * poolBalance) / totalShares;
+        uint256 grossAmount = (req.shares * poolBalance) / totalShares;
 
         uint256 userShares = shares[msg.sender];
-        require(userShares >= req.shares, "Not enough shares at claim");
+        require(userShares >= req.shares, "Not enough shares");
+
+        uint256 principalPart =
+            (deposited[msg.sender] * req.shares) / userShares;
+
+        uint256 profit = 0;
+        if (grossAmount > principalPart) {
+            profit = grossAmount - principalPart;
+        }
+
+        uint256 feeBpsNow = _feeBpsForWithdraw(req);
+        uint256 fee = (profit * feeBpsNow) / 10000;
+        uint256 payout = grossAmount - fee;
+
         shares[msg.sender] = userShares - req.shares;
         totalShares -= req.shares;
-
+        deposited[msg.sender] -= principalPart;
         delete withdrawalRequests[msg.sender];
 
-        (bool ok, ) = msg.sender.call{value: ethAmount}("");
-        require(ok, "ETH transfer failed");
+        (bool ok1, ) = msg.sender.call{value: payout}("");
+        require(ok1, "Payout failed");
 
-        emit Withdrawn(msg.sender, ethAmount, req.shares);
+        if (fee > 0) {
+            (bool ok2, ) = owner.call{value: fee}("");
+            require(ok2, "Fee transfer failed");
+            emit FeeTaken(msg.sender, profit, fee);
+        }
+
+        emit Withdrawn(msg.sender, payout, req.shares);
     }
 
     function addRewards() external payable {
@@ -125,5 +145,12 @@ contract StakingPool {
         require(newOwner != address(0), "Zero address");
         emit OwnerChanged(owner, newOwner);
         owner = newOwner;
+    }
+
+    function _feeBpsForWithdraw(WithdrawalRequest memory req) internal view returns (uint256) {
+        if (block.timestamp < req.readyAt) {
+            return EARLY_FEE_BPS;
+        }
+        return NORMAL_FEE_BPS;
     }
 }
