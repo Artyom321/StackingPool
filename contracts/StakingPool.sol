@@ -4,7 +4,8 @@ pragma solidity ^0.8.28;
 contract StakingPool {
     address public owner;
     uint256 public totalShares;
-    uint256 public feeBps;
+    uint256 public constant NORMAL_FEE_BPS = 500;
+    uint256 public constant EARLY_FEE_BPS  = 1500;
     mapping(address => uint256) public deposited;
     mapping(address => uint256) public shares;
 
@@ -42,7 +43,6 @@ contract StakingPool {
         owner = msg.sender;
         _status = 1;
         withdrawalDelay = _withdrawalDelay;
-        feeBps = 1500;
     }
 
     function totalPooled() public view returns (uint256) {
@@ -95,7 +95,6 @@ contract StakingPool {
     function claimWithdraw() external nonReentrant {
         WithdrawalRequest memory req = withdrawalRequests[msg.sender];
         require(req.shares > 0, "No pending withdrawal");
-        require(block.timestamp >= req.readyAt, "Withdrawal not ready");
 
         uint256 poolBalance = address(this).balance;
         uint256 grossAmount = (req.shares * poolBalance) / totalShares;
@@ -111,7 +110,8 @@ contract StakingPool {
             profit = grossAmount - principalPart;
         }
 
-        uint256 fee = (profit * feeBps) / 10000;
+        uint256 feeBpsNow = _feeBpsForWithdraw(req);
+        uint256 fee = (profit * feeBpsNow) / 10000;
         uint256 payout = grossAmount - fee;
 
         shares[msg.sender] = userShares - req.shares;
@@ -147,7 +147,10 @@ contract StakingPool {
         owner = newOwner;
     }
 
-    function setFeeBps(uint256 _feeBps) external onlyOwner {
-        feeBps = _feeBps;
+    function _feeBpsForWithdraw(WithdrawalRequest memory req) internal view returns (uint256) {
+        if (block.timestamp < req.readyAt) {
+            return EARLY_FEE_BPS;
+        }
+        return NORMAL_FEE_BPS;
     }
 }
