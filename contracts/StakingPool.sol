@@ -5,6 +5,16 @@ contract StakingPool {
     address public owner;
     uint256 public totalShares;
     mapping(address => uint256) public shares;
+
+    uint256 public withdrawalDelay;
+
+    struct WithdrawalRequest {
+        uint256 shares;
+        uint256 readyAt;
+    }
+
+    mapping(address => WithdrawalRequest) public withdrawalRequests;
+
     uint256 private _status;
 
     modifier nonReentrant() {
@@ -20,13 +30,15 @@ contract StakingPool {
     }
 
     event Deposited(address indexed user, uint256 amount, uint256 sharesMinted);
+    event WithdrawRequested(address indexed user, uint256 shares, uint256 readyAt);
     event Withdrawn(address indexed user, uint256 amount, uint256 sharesBurned);
     event RewardsAdded(address indexed from, uint256 amount);
     event OwnerChanged(address indexed oldOwner, address indexed newOwner);
 
-    constructor() {
+    constructor(uint256 _withdrawalDelay) {
         owner = msg.sender;
         _status = 1;
+        withdrawalDelay = _withdrawalDelay;
     }
 
     function totalPooled() public view returns (uint256) {
@@ -59,23 +71,44 @@ contract StakingPool {
         emit Deposited(msg.sender, msg.value, sharesToMint);
     }
 
-    function withdraw(uint256 shareAmount) external nonReentrant {
+    function requestWithdraw(uint256 shareAmount) external nonReentrant {
         require(shareAmount > 0, "Zero shares");
-        uint256 userShares = shares[msg.sender];
-        require(shareAmount <= userShares, "Not enough shares");
+        require(shareAmount <= shares[msg.sender], "Not enough shares");
+
+        WithdrawalRequest storage req = withdrawalRequests[msg.sender];
+        require(req.shares == 0, "Pending withdrawal");
+
+        uint256 readyAt = block.timestamp + withdrawalDelay;
+        withdrawalRequests[msg.sender] = WithdrawalRequest({
+            shares: shareAmount,
+            readyAt: readyAt
+        });
+
+        emit WithdrawRequested(msg.sender, shareAmount, readyAt);
+    }
+
+    function claimWithdraw() external nonReentrant {
+        WithdrawalRequest memory req = withdrawalRequests[msg.sender];
+        require(req.shares > 0, "No pending withdrawal");
+        require(block.timestamp >= req.readyAt, "Withdrawal not ready");
 
         uint256 poolBalance = address(this).balance;
         require(poolBalance > 0, "Empty pool");
+        require(totalShares > 0, "No shares");
 
-        uint256 ethAmount = (shareAmount * poolBalance) / totalShares;
+        uint256 ethAmount = (req.shares * poolBalance) / totalShares;
 
-        shares[msg.sender] = userShares - shareAmount;
-        totalShares -= shareAmount;
+        uint256 userShares = shares[msg.sender];
+        require(userShares >= req.shares, "Not enough shares at claim");
+        shares[msg.sender] = userShares - req.shares;
+        totalShares -= req.shares;
+
+        delete withdrawalRequests[msg.sender];
 
         (bool ok, ) = msg.sender.call{value: ethAmount}("");
         require(ok, "ETH transfer failed");
 
-        emit Withdrawn(msg.sender, ethAmount, shareAmount);
+        emit Withdrawn(msg.sender, ethAmount, req.shares);
     }
 
     function addRewards() external payable {
